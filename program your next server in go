@@ -1,0 +1,147 @@
+这篇文章来源于在Youtube上看到的一个分享，链接地址为https://www.youtube.com/watch?v=5bYO60-qYOI&t=3205s，
+ppt链接地址 https://www.youtube.com/watch?v=5bYO60-qYOI&t=3205s
+在这篇分享中，提供了一个很好的go语言的思路，就是如何用go语言，把一个一开始运行缓慢并且易出错的串行执行的程序修改成为一个快速鲁棒的并行程序的。
+
+在看了这么多go语言的资料之后，总结起来go语言是一个高效的开发并行程序的语言，go语言的三宝，goroutine，channel，select，这里就不赘述。基本来讲，
+go语言是年轻的语言，它的设计目的，就是为了更容易的去解决分布式的问题。
+
+下面，直接看是如何进行改造的
+
+Version 1 ： 运行缓慢的串行代码
+
+var (
+    Web   = FakeSearch("web", "The Go Programming Language", "http://golang.org")
+    Image = FakeSearch("image", "The Go gopher", "https://blog.golang.org/gopher/gopher.png")
+    Video = FakeSearch("video", "Concurrency is not Parallelism", "https://www.youtube.com/watch?v=cN_DpYBzKso")
+)
+／／这里是模拟google的查询逻辑，分别搜索网页，图片和视频
+
+type SearchFunc func(query string) Result ／／这里定义了一个SerachFunc类型，它是一个接受一个string参数，返回一个Result类型的函数
+
+func FakeSearch(kind, title, url string) SearchFunc {
+／／Fake Search函数接受三个string参数，返回一个上面定义的SearchFunc类型的函数
+／／在Go语言里面，函数也是First Order的，言外之意，也是可以作为函数的传入参数或者返回值的
+    return func(query string) Result {
+        time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)／／这里就随机的Sleep一段时间，来模拟实际中的一段逻辑
+        return Result{
+            Title: fmt.Sprintf("%s(%q): %s", kind, query, title),
+            URL:   url,
+        }／／这里直接返回了一个匿名函数，和许多其他语言类似，go语言支持匿名函数，写起来很方便
+    }
+}
+
+测试函数如下
+func main() {
+    start := time.Now()
+    results, err := google.Search("golang")
+    elapsed := time.Since(start)
+    fmt.Println(results)
+    fmt.Println(elapsed, err)
+}
+
+下面就来看第一版的Search是怎么实现的
+func Search(query string) ([]Result, error) {
+    results := []Result{
+        Web(query),
+        Image(query),
+        Video(query),
+    }
+    return results, nil
+}
+如上所示，Search函数的实现是分别执行Web，Image，Video三个查询，注意，这里就是串行的查询，等到它们的返回结果都到了之后，然后拼凑成结果，返回出去；
+这就是最原始的搜索模型，一个个搜索，得到结果，返回结果，那么需要运行的时间就是三个查询的时间之和
+
+Version 2 ：并行查询
+这里就利用了goroutine来进行并行化的查询，实现了一版SearchParallel，代码如下
+func SearchParallel(query string) ([]Result, error) {
+    c := make(chan Result)  ／／首先定义了一个Channel，管道，这个管道里面存放的是Result类型的元素
+    go func() { c <- Web(query) }()
+    go func() { c <- Image(query) }()
+    go func() { c <- Video(query) }()
+    ／／这里启动了3个goroutine，3个goroutine分别去进行网页，图片，视频的查询，并且把结果写入管道
+
+    return []Result{<-c, <-c, <-c}, nil／／从管道里面读取结果，并返回
+}
+利用了管道和goroutine，可以很容易的改造成为并行的程序，那么，这里的执行结果，就是三个查询里面时间最长的那个（与之前的耗时是三者结果之和相比，有了很大的提升）
+
+Version 3:加上超时
+Version 2中，执行时长，是三者里面执行时间是三者里面执行时间最长的，在实际中，很长时间的等待对于万家来讲是没有意义的，可能在进行网页查询的时候返回非常快，
+然后需要等Image和Video，假设等待很久，用户可能就放弃查询，这个问题怎么解决呢。引入超时，超过一定时间没有完整的返回结果就停止，并且把当前已经返回的结果
+反馈给用户，不失为一种比较好的策略，就产生了如下的实现
+func SearchTimeout(query string, timeout time.Duration) ([]Result, error) {
+    timer := time.After(timeout)／／time.After返回一个管道，在timeout时间之后，会向管道之中写入数据
+    c := make(chan Result, 3)
+    go func() { c <- Web(query) }()
+    go func() { c <- Image(query) }()
+    go func() { c <- Video(query) }()
+
+    var results []Result
+    for i := 0; i < 3; i++ {
+        select {／／这里利用了go语言的select，select会阻塞住，直到case里面的任何一种情况发生
+        case result := <-c:／／有了正常的返回结果，外面for循环了三次，如果三次执行都完了，那就是正常的拿到了结果
+            results = append(results, result)
+        case <-timer:／／如果这里出了结果，那说明超时，直接返回当前results里面的结果，也就是说一旦超时，就把当前能返回的结果先返回
+            return results, errors.New("timed out")
+        }
+    }
+    return results, nil
+    
+    上面就是对并行程序的一个很好的思路补充，引入超时，一旦超时，就把当前的结果先返回，这是一种很好的开发思路
+    
+    Version 4: Replication Set
+    当我看到上面第三点的时候，已经觉得go语言很不错了，而且对于之前的改造已经做的比较好了，想说，还有进一步改进的余地吗，作者在PPT里面还给出了一个；
+    我们来考虑下，上面的Version 3有什么不足呢？是的，它会有Timeout，有没有办法去解决这个timeout呢，或者说尽可能的降低timeout发生的频率呢？
+    那就得考虑timeout的产生了，timeout的产生，一定是某些查询的运行时间比较慢（在本例中，就是随机时间的时候，随机出了一个比较大的时间），所以，
+    一个很朴素的想法就是同时去执行多个查询，有一个给出返回结果就返回，比如，同时执行两个Video的查询，选两个里面最早返回的结果返回就可以（在本例中，
+    这样就可以一定程度降低了出现较大时间的概率，因为这次必须随机出多个大时间才可以），这样的改造，在go里面很复杂吗，一点也不，看下面的代码
+    
+   func First(replicas ...SearchFunc) SearchFunc {／／这个...的表达式，我最早在go语言里面见到，表示任意数量的参数，
+   ／／这里First函数接受任意多个SearchFunc类型的函数，并且返回一个SerachFunc类型函数
+    return func(query string) Result {
+        c := make(chan Result, len(replicas))
+        searchReplica := func(i int) {
+            c <- replicas[i](query)
+        }／／像之前所说，在go语言里，函数是first order的，所以它可以被当作对象传递，所以当然可以赋值给变量
+        for i := range replicas {
+            go searchReplica(i)
+        }／／这里就同时起了多个goroutine去运行，等于去同时跑多个同一查询，查询的代码是把查询结果写入管道
+        return <-c／／管道是阻塞的，这里有了结果，就立刻把结果返回出去
+        ／／利用管道的阻塞特性，就很清晰明了的表达了把最早返回的结果返回出去的意思
+    }
+}
+综上所属，First函数就是接受多个查询函数，它会返回一个查询函数，该查询函数会返回First里面传入的那些查询函数里面，最早给出返回结果的那个的返回结果，
+说起来有点拗口。
+有了First函数之后，就可以对之前的查询进行改造
+改造一：search函数
+func main() {
+    start := time.Now()
+    search := google.First(
+        google.FakeSearch("replica 1", "I'm #1!", ""),
+        google.FakeSearch("replica 2", "#2 wins!", ""))
+    result := search("golang")
+    elapsed := time.Since(start)
+    fmt.Println(result)
+    fmt.Println(elapsed)
+}
+之前是一个search，这里直接用了两个FakeSearch，那么结果就是两个Search里面最快的
+
+改造二：FakeSearch的修改
+var (
+    replicatedWeb   = First(Web1, Web2)
+    replicatedImage = First(Image1, Image2)
+    replicatedVideo = First(Video1, Video2)
+)
+
+func SearchReplicated(query string, timeout time.Duration) ([]Result, error) {
+    timer := time.After(timeout)
+    c := make(chan Result, 3)
+    go func() { c <- replicatedWeb(query) }()
+    go func() { c <- replicatedImage(query) }()
+    go func() { c <- replicatedVideo(query) }()
+    
+每次在进行具体搜索的时候，都同时通过relicationSet去搜索，拿到最快的返回结果，从而降低了出现timeout的频率
+
+整个改造就完成了！
+
+纵观整个过程，利用了并行，多路执行取最快结果的方式，大大提升了程序的执行效率和鲁棒性，而这一切用go语言提供的goroutine，channel，select又可以很自然
+快速的改造出来，这让我对go语言产生了极大的好感
