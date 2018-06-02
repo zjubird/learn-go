@@ -7,7 +7,7 @@ go语言是年轻的语言，它的设计目的，就是为了更容易的去解
 
 下面，直接看是如何进行改造的
 
-Version 1 ： 运行缓慢的串行代码
+##Version 1 ： 运行缓慢的串行代码
 
 var (
     Web   = FakeSearch("web", "The Go Programming Language", "http://golang.org")
@@ -51,7 +51,7 @@ func Search(query string) ([]Result, error) {
 如上所示，Search函数的实现是分别执行Web，Image，Video三个查询，注意，这里就是串行的查询，等到它们的返回结果都到了之后，然后拼凑成结果，返回出去；
 这就是最原始的搜索模型，一个个搜索，得到结果，返回结果，那么需要运行的时间就是三个查询的时间之和
 
-Version 2 ：并行查询
+##Version 2 ：并行查询
 这里就利用了goroutine来进行并行化的查询，实现了一版SearchParallel，代码如下
 func SearchParallel(query string) ([]Result, error) {
     c := make(chan Result)  ／／首先定义了一个Channel，管道，这个管道里面存放的是Result类型的元素
@@ -64,7 +64,7 @@ func SearchParallel(query string) ([]Result, error) {
 }
 利用了管道和goroutine，可以很容易的改造成为并行的程序，那么，这里的执行结果，就是三个查询里面时间最长的那个（与之前的耗时是三者结果之和相比，有了很大的提升）
 
-Version 3:加上超时
+## Version 3:加上超时
 Version 2中，执行时长，是三者里面执行时间是三者里面执行时间最长的，在实际中，很长时间的等待对于万家来讲是没有意义的，可能在进行网页查询的时候返回非常快，
 然后需要等Image和Video，假设等待很久，用户可能就放弃查询，这个问题怎么解决呢。引入超时，超过一定时间没有完整的返回结果就停止，并且把当前已经返回的结果
 反馈给用户，不失为一种比较好的策略，就产生了如下的实现
@@ -87,8 +87,7 @@ func SearchTimeout(query string, timeout time.Duration) ([]Result, error) {
     return results, nil
     
     上面就是对并行程序的一个很好的思路补充，引入超时，一旦超时，就把当前的结果先返回，这是一种很好的开发思路
-    
-    Version 4: Replication Set
+## Version 4: Replication Set
     当我看到上面第三点的时候，已经觉得go语言很不错了，而且对于之前的改造已经做的比较好了，想说，还有进一步改进的余地吗，作者在PPT里面还给出了一个；
     我们来考虑下，上面的Version 3有什么不足呢？是的，它会有Timeout，有没有办法去解决这个timeout呢，或者说尽可能的降低timeout发生的频率呢？
     那就得考虑timeout的产生了，timeout的产生，一定是某些查询的运行时间比较慢（在本例中，就是随机时间的时候，随机出了一个比较大的时间），所以，
